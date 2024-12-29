@@ -1,60 +1,149 @@
 import logging
 from scapy.all import sniff, IP, TCP, UDP
+from datetime import datetime
+import threading
+import time
 import os
 
-# Set up logging to log alerts (log file will be in 'logs' folder)
-if not os.path.exists('logs'):
-    os.makedirs('logs')  # Ensure the logs directory exists
+# Setup logging for alerts and summaries
+LOG_DIR = "logs"
+ALERT_LOG_FILE = f"{LOG_DIR}/alerts.log"
+SUMMARY_LOG_FILE = f"{LOG_DIR}/summary.log"
 
-logging.basicConfig(filename='logs/alerts.log', level=logging.INFO, format='%(asctime)s - %(message)s')
+# Ensure the logs directory exists
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
 
-# Blacklisted IPs (Example: List of IPs to block)
+# Configure logging for alerts
+logging.basicConfig(
+    filename=ALERT_LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+
+# Configure summary logging
+summary_logger = logging.getLogger('summary')
+summary_logger.setLevel(logging.INFO)
+summary_handler = logging.FileHandler(SUMMARY_LOG_FILE)
+summary_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+summary_logger.addHandler(summary_handler)
+
+# Blacklisted IPs
 BLACKLISTED_IPS = ["192.168.1.100", "10.0.0.5"]
 
-# Blocked Ports (Example: List of ports to block)
+# Blocked Ports
 BLOCKED_PORTS = [22]
 
-# Max allowed packet size in bytes
-MAX_PACKET_SIZE = 1024  # For example, drop packets larger than 1024 bytes
+# Max allowed packet size
+MAX_PACKET_SIZE = 1024  # Bytes
 
-# Filter packets based on custom rules
+# Packet counters
+packet_summary = {
+    "total": 0,
+    "allowed": 0,
+    "blocked": 0,
+    "malicious": 0
+}
+
+# Filter and log packets
 def filter_packet(packet):
+    global packet_summary
+    packet_summary["total"] += 1
+
     if packet.haslayer(IP):
         ip_src = packet[IP].src
         ip_dst = packet[IP].dst
         protocol = packet.proto
         packet_size = len(packet)
-        
-        # Rule 1: Blacklist specific IPs
-        if ip_src in BLACKLISTED_IPS or ip_dst in BLACKLISTED_IPS:
-            logging.warning(f"Blocked packet from blacklisted IP: {ip_src} to {ip_dst} ({protocol})")
-            return False  # Drop the packet
 
-        # Rule 2: Block traffic on specified ports (e.g., HTTP, HTTPS, SSH)
+        action = "Allowed"
+
+        # Rule 1: Blacklisted IPs
+        if ip_src in BLACKLISTED_IPS or ip_dst in BLACKLISTED_IPS:
+            action = "Blocked"
+            reason = "Blacklisted IP"
+            packet_summary["blocked"] += 1
+            packet_summary["malicious"] += 1
+            logging.warning(
+                f"Blocked: {reason} | Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes"
+            )
+            return False
+
+        # Rule 2: Blocked Ports
         if packet.haslayer(TCP) or packet.haslayer(UDP):
             dport = packet.dport if packet.haslayer(TCP) else packet.sport
             if dport in BLOCKED_PORTS:
-                logging.warning(f"Blocked traffic on port {dport} from {ip_src} to {ip_dst}")
-                return False  # Drop the packet
-        
-        # Rule 3: Drop packets exceeding a certain size
+                action = "Blocked"
+                reason = "Blocked Port"
+                packet_summary["blocked"] += 1
+                packet_summary["malicious"] += 1
+                logging.warning(
+                    f"Blocked: {reason} | Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Port: {dport}"
+                )
+                return False
+
+        # Rule 3: Max Packet Size
         if packet_size > MAX_PACKET_SIZE:
-            logging.warning(f"Dropped packet exceeding size limit: {packet_size} bytes from {ip_src} to {ip_dst}")
-            return False  # Drop the packet
+            action = "Blocked"
+            reason = "Packet Size Exceeded"
+            packet_summary["blocked"] += 1
+            logging.warning(
+                f"Blocked: {reason} | Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes"
+            )
+            return False
 
         # Log allowed packets
-        logging.info(f"Allowed packet: {ip_src} -> {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes")
-        return True  # Accept the packet if it passes all rules
+        if action == "Allowed":
+            packet_summary["allowed"] += 1
+            logging.info(
+                f"Allowed: Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes"
+            )
 
-    # If the packet doesn't have an IP layer, it is logged as ignored
-    logging.info(f"Ignored non-IP packet")
-    return False
+    return True
 
-# Function to capture live packets
+# Capture packets
 def capture_packets(interface="Ethernet"):
     print(f"Capturing packets on interface {interface}...")
-    sniff(iface=interface, prn=lambda x: filter_packet(x), store=0)  # Capture packets and apply filter_packet function
+    sniff(iface=interface, prn=lambda x: filter_packet(x), store=0)
 
-if __name__ == '__main__':
-    # Start capturing packets on a specific interface (change interface as needed)
-    capture_packets(interface="Ethernet")  # Replace with the correct network interface name on your system
+# Periodic summary logging (to be run in a separate thread)
+def log_summary_periodically(interval=5):
+    while True:
+        time.sleep(interval)  # Wait for the specified interval before logging the summary
+        summary_log = (
+            f"Packet Summary:\n"
+            f"Total Packets: {packet_summary['total']}\n"
+            f"Allowed Packets: {packet_summary['allowed']}\n"
+            f"Blocked Packets: {packet_summary['blocked']}\n"
+            f"Malicious Packets: {packet_summary['malicious']}\n"
+        )
+        print(summary_log)
+        summary_logger.info(summary_log)  # Log the summary to summary.log
+
+# Periodic summary logging thread
+def start_summary_thread():
+    summary_thread = threading.Thread(target=log_summary_periodically, args=(5,), daemon=True)
+    summary_thread.start()
+
+if __name__ == "__main__":
+    try:
+        # Start the summary thread before capturing packets
+        start_summary_thread()
+
+        # Start capturing packets
+        capture_packets(interface="Ethernet")
+
+    except KeyboardInterrupt:
+        print("\nStopping packet capture...")
+
+        # Log final summary on capture stop
+        final_summary_log = (
+            f"Final Packet Summary:\n"
+            f"Total Packets: {packet_summary['total']}\n"
+            f"Allowed Packets: {packet_summary['allowed']}\n"
+            f"Blocked Packets: {packet_summary['blocked']}\n"
+            f"Malicious Packets: {packet_summary['malicious']}\n"
+        )
+        summary_logger.info(final_summary_log)  # Log the final summary to summary.log
+        print(final_summary_log)
