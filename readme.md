@@ -1,5 +1,5 @@
 # Network Traffic Monitoring
-![firewall_banner](firewall-banner.md)
+![firewall_banner](Picrures/firewall-banner.png)
 ## 📋 Project Description
 A real-time network traffic monitoring system built using Python and Scapy. This project provides comprehensive packet analysis, threat detection, and logging capabilities for network security.
 
