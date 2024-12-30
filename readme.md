@@ -4,15 +4,6 @@
 A real-time network traffic monitoring system built using Python and Scapy. This project provides comprehensive packet analysis, threat detection, and logging capabilities for network security.
 
 ---
-## 📑 Table of Contents
-1. [Features](#-features)
-2. [Requirements](#%EF%B8%8F-requirements)
-3. [Installation](#-installation)
-4. [Usage](#-usage)
-5. [File Structure](#-file-structure)
-6. [Configuration](#-configuration)
-
----
 ## 🌟 Features
 - Real-time packet capturing and filtering using custom rules
 - Blocked traffic based on blacklisted IPs and ports
