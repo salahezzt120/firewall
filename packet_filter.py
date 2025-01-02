@@ -1,44 +1,51 @@
 import logging
-from scapy.all import sniff, IP, TCP, UDP
-from datetime import datetime
-import threading
-import time
 import os
+from scapy.all import sniff, IP, TCP, UDP
+from threading import Event
+from collections import defaultdict
+import time
 
-# Setup logging for alerts and summaries
+# Setup logging
 LOG_DIR = "logs"
-ALERT_LOG_FILE = f"{LOG_DIR}/alerts.log"
+ALERT_LOG_FILE = f"{LOG_DIR}/blocked.log"
 SUMMARY_LOG_FILE = f"{LOG_DIR}/summary.log"
+ALLOWED_LOG_FILE = f"{LOG_DIR}/allowed.log"
+Maliscious_LOG_FILE = f"{LOG_DIR}/maliscious.log"
 
-# Ensure the logs directory exists
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 
-# Configure logging for alerts
-logging.basicConfig(
-    filename=ALERT_LOG_FILE,
-    level=logging.INFO,
-    format="%(asctime)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO)
 
-# Configure summary logging
-summary_logger = logging.getLogger('summary')
-summary_logger.setLevel(logging.INFO)
+# Initialize loggers
+alert_logger = logging.getLogger("alert_logger")
+summary_logger = logging.getLogger("summary_logger")
+allowed_logger = logging.getLogger("allowed_logger")
+malisious_logger = logging.getLogger("malisious_logger")
+
+alert_handler = logging.FileHandler(ALERT_LOG_FILE)
 summary_handler = logging.FileHandler(SUMMARY_LOG_FILE)
-summary_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+allowed_handler = logging.FileHandler(ALLOWED_LOG_FILE)
+malisious_handler = logging.FileHandler(Maliscious_LOG_FILE)
+
+alert_handler.setLevel(logging.WARNING)
+summary_handler.setLevel(logging.INFO)
+allowed_handler.setLevel(logging.INFO)
+malisious_handler.setLevel(logging.INFO)
+
+alert_logger.addHandler(alert_handler)
 summary_logger.addHandler(summary_handler)
+allowed_logger.addHandler(allowed_handler)
+malisious_logger.addHandler(malisious_handler)
 
-# Blacklisted IPs
-BLACKLISTED_IPS = ["192.168.1.100", "10.0.0.5"]
+# Variables for filtering
+BLACKLISTED_IPS = []  # Dictionary to store IPs and their block reason
+BLOCKED_PORTS = []
+MAX_PACKET_SIZE = 1800  # Example size (in bytes)
+DOS_THRESHOLD = 500  # Number of packets per IP in a given time interval
+DOS_TIME_INTERVAL = 1  # Time interval in seconds
 
-# Blocked Ports
-BLOCKED_PORTS = [22]
-
-# Max allowed packet size
-MAX_PACKET_SIZE = 1024  # Bytes
-
-# Packet counters
+# Packet summary
 packet_summary = {
     "total": 0,
     "allowed": 0,
@@ -46,7 +53,57 @@ packet_summary = {
     "malicious": 0
 }
 
-# Filter and log packets
+# DoS detection variables
+ip_packet_count = defaultdict(int)
+ip_last_seen = {}
+
+# Stop flag for sniffing
+stop_event = Event()
+
+def reset_logs():
+    with open(ALERT_LOG_FILE, 'w'), open(SUMMARY_LOG_FILE, 'w'), open(ALLOWED_LOG_FILE, 'w'):
+        pass
+
+def update_summary_log():
+    summary_text = (
+        f"Total Packets: {packet_summary['total']}\n"
+        f"Allowed: {packet_summary['allowed']}\n"
+        f"Blocked: {packet_summary['blocked']}\n"
+        f"Malicious: {packet_summary['malicious']}\n"
+    )
+    with open(SUMMARY_LOG_FILE, 'w') as f:
+        f.write(summary_text)
+
+def detect_dos_attack(ip_src, dport):
+    """
+    Detects a DoS attack based on packet rate from a specific source IP.
+    """
+    global packet_summary
+    current_time = time.time()
+
+    if ip_src not in ip_packet_count:
+        ip_packet_count[ip_src] = 0
+        ip_last_seen[ip_src] = current_time
+
+    ip_packet_count[ip_src] += 1
+    elapsed_time = current_time - ip_last_seen[ip_src]
+
+    if elapsed_time <= DOS_TIME_INTERVAL:
+        if ip_packet_count[ip_src] > DOS_THRESHOLD:
+            if ip_packet_count[ip_src] == DOS_THRESHOLD + 1:  # Log the attack once
+                packet_summary["malicious"] += 1
+                packet_summary["blocked"] += 1
+                malisious_logger.warning(f"Detected DoS Attack - Source IP: {ip_src}, Port: {dport}")
+                update_summary_log()
+                add_blacklisted_ip(ip_src)  # Blacklist the IP
+                add_blocked_port(dport)  # Block the port
+            return True
+    else:
+        ip_packet_count[ip_src] = 1  # Reset count after the time window
+        ip_last_seen[ip_src] = current_time
+
+    return False
+
 def filter_packet(packet):
     global packet_summary
     packet_summary["total"] += 1
@@ -56,94 +113,71 @@ def filter_packet(packet):
         ip_dst = packet[IP].dst
         protocol = packet.proto
         packet_size = len(packet)
-
         action = "Allowed"
 
-        # Rule 1: Blacklisted IPs
-        if ip_src in BLACKLISTED_IPS or ip_dst in BLACKLISTED_IPS:
+        dport = None
+        sport = None
+
+        # Check if TCP or UDP, and get port information
+        if packet.haslayer(TCP):
+            dport = packet.dport
+            sport = packet.sport
+        elif packet.haslayer(UDP):
+            dport = packet.dport
+            sport = packet.sport
+
+        # DoS Detection
+        if detect_dos_attack(ip_src,dport):
             action = "Blocked"
-            reason = "Blacklisted IP"
-            packet_summary["blocked"] += 1
-            packet_summary["malicious"] += 1
-            logging.warning(
-                f"Blocked: {reason} | Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes"
-            )
+
             return False
 
-        # Rule 2: Blocked Ports
+        if ip_src in BLACKLISTED_IPS:
+            action = "Blocked"
+           
+            alert_logger.warning(f"Blocked: Blacklisted IP | Src: {ip_src} -> Dst: {ip_dst}, Port: {dport}")
+            packet_summary["blocked"] += 1
+            update_summary_log()
+            return False
+     
+
         if packet.haslayer(TCP) or packet.haslayer(UDP):
-            dport = packet.dport if packet.haslayer(TCP) else packet.sport
             if dport in BLOCKED_PORTS:
                 action = "Blocked"
-                reason = "Blocked Port"
                 packet_summary["blocked"] += 1
-                packet_summary["malicious"] += 1
-                logging.warning(
-                    f"Blocked: {reason} | Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Port: {dport}"
-                )
+                alert_logger.warning(f"Blocked: Blocked Port | Src: {ip_src} -> Dst: {ip_dst}, Src Port: {sport}, Dst Port: {dport}")
+                update_summary_log()
                 return False
 
-        # Rule 3: Max Packet Size
         if packet_size > MAX_PACKET_SIZE:
             action = "Blocked"
-            reason = "Packet Size Exceeded"
             packet_summary["blocked"] += 1
-            logging.warning(
-                f"Blocked: {reason} | Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes"
-            )
+            alert_logger.warning(f"Blocked: Packet Size Exceeded | Src: {ip_src} -> Dst: {ip_dst}, Size: {packet_size} bytes, Port: {dport}")
+            update_summary_log()
             return False
 
-        # Log allowed packets
         if action == "Allowed":
             packet_summary["allowed"] += 1
-            logging.info(
-                f"Allowed: Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Size: {packet_size} bytes"
-            )
+            allowed_logger.info(f"Allowed Packet - Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Src Port: {sport}, Dst Port: {dport}, Size: {packet_size} bytes")
+            update_summary_log()
 
-    return True
+def capture_packets():
+    while not stop_event.is_set():
+        sniff(iface="Wi-Fi", prn=filter_packet, store=0, timeout=1)
 
-# Capture packets
-def capture_packets(interface="Ethernet"):
-    print(f"Capturing packets on interface {interface}...")
-    sniff(iface=interface, prn=lambda x: filter_packet(x), store=0)
+def stop_capture():
+    stop_event.set()
 
-# Periodic summary logging (to be run in a separate thread)
-def log_summary_periodically(interval=5):
-    while True:
-        time.sleep(interval)  # Wait for the specified interval before logging the summary
-        summary_log = (
-            f"Packet Summary:\n"
-            f"Total Packets: {packet_summary['total']}\n"
-            f"Allowed Packets: {packet_summary['allowed']}\n"
-            f"Blocked Packets: {packet_summary['blocked']}\n"
-            f"Malicious Packets: {packet_summary['malicious']}\n"
-        )
-        print(summary_log)
-        summary_logger.info(summary_log)  # Log the summary to summary.log
+def add_blacklisted_ip(ip):
+    if ip and ip not in BLACKLISTED_IPS:
+        BLACKLISTED_IPS.append(ip)
+def remove_blacklisted_ip(ip):
+    if ip in BLACKLISTED_IPS:
+        BLACKLISTED_IPS.remove(ip)
+def add_blocked_port(port):
+    if port not in BLOCKED_PORTS:
+        BLOCKED_PORTS.append(port)
 
-# Periodic summary logging thread
-def start_summary_thread():
-    summary_thread = threading.Thread(target=log_summary_periodically, args=(5,), daemon=True)
-    summary_thread.start()
-
-if __name__ == "__main__":
-    try:
-        # Start the summary thread before capturing packets
-        start_summary_thread()
-
-        # Start capturing packets
-        capture_packets(interface="Ethernet")
-
-    except KeyboardInterrupt:
-        print("\nStopping packet capture...")
-
-        # Log final summary on capture stop
-        final_summary_log = (
-            f"Final Packet Summary:\n"
-            f"Total Packets: {packet_summary['total']}\n"
-            f"Allowed Packets: {packet_summary['allowed']}\n"
-            f"Blocked Packets: {packet_summary['blocked']}\n"
-            f"Malicious Packets: {packet_summary['malicious']}\n"
-        )
-        summary_logger.info(final_summary_log)  # Log the final summary to summary.log
-        print(final_summary_log)
+def remove_blocked_port(port):
+    if port in BLOCKED_PORTS:
+        BLOCKED_PORTS.remove(port)
