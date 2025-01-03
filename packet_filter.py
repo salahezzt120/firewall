@@ -39,7 +39,8 @@ allowed_logger.addHandler(allowed_handler)
 malisious_logger.addHandler(malisious_handler)
 
 # Variables for filtering
-BLACKLISTED_IPS = []  # Dictionary to store IPs and their block reason
+WHITELISTED_IPS = ["192.168.1.13"]  # List of whitelisted IPs
+BLACKLISTED_IPS = []
 BLOCKED_PORTS = []
 MAX_PACKET_SIZE = 1800  # Example size (in bytes)
 DOS_THRESHOLD = 500  # Number of packets per IP in a given time interval
@@ -79,8 +80,10 @@ def detect_dos_attack(ip_src, dport):
     Detects a DoS attack based on packet rate from a specific source IP.
     """
     global packet_summary
-    current_time = time.time()
+    if ip_src in WHITELISTED_IPS:
+        return False  # Skip DoS detection for whitelisted IPs
 
+    current_time = time.time()
     if ip_src not in ip_packet_count:
         ip_packet_count[ip_src] = 0
         ip_last_seen[ip_src] = current_time
@@ -126,20 +129,23 @@ def filter_packet(packet):
             dport = packet.dport
             sport = packet.sport
 
-        # DoS Detection
-        if detect_dos_attack(ip_src,dport):
-            action = "Blocked"
+        # Skip detection for whitelisted IPs
+        if ip_src in WHITELISTED_IPS:
+            packet_summary["allowed"] += 1
+            allowed_logger.info(f"Allowed Packet - Src: {ip_src} -> Dst: {ip_dst}, Protocol: {protocol}, Src Port: {sport}, Dst Port: {dport}, Size: {packet_size} bytes")
+            update_summary_log()
+            return True
 
+        # DoS Detection
+        if detect_dos_attack(ip_src, dport):
             return False
 
         if ip_src in BLACKLISTED_IPS:
             action = "Blocked"
-           
             alert_logger.warning(f"Blocked: Blacklisted IP | Src: {ip_src} -> Dst: {ip_dst}, Port: {dport}")
             packet_summary["blocked"] += 1
             update_summary_log()
             return False
-     
 
         if packet.haslayer(TCP) or packet.haslayer(UDP):
             if dport in BLOCKED_PORTS:
@@ -171,9 +177,11 @@ def stop_capture():
 def add_blacklisted_ip(ip):
     if ip and ip not in BLACKLISTED_IPS:
         BLACKLISTED_IPS.append(ip)
+
 def remove_blacklisted_ip(ip):
     if ip in BLACKLISTED_IPS:
         BLACKLISTED_IPS.remove(ip)
+
 def add_blocked_port(port):
     if port not in BLOCKED_PORTS:
         BLOCKED_PORTS.append(port)

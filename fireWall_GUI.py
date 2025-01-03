@@ -203,7 +203,7 @@ class FirewallGUI:
         try:
             with open(packet_filter.SUMMARY_LOG_FILE, "r") as f:
                 summary = f.read().strip()
-            messagebox.showinfo("Capture Summary", summary)
+            messagebox.showinfo("Capture Summary", f"Capture stopped.\n\nSummary:\n{summary}")
         except Exception as e:
             messagebox.showerror("Error", f"Error reading summary log: {str(e)}")
         
